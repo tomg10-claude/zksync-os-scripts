@@ -28,6 +28,15 @@ from lib.protocol_version import (
 
 
 # ---------------------------------------------------------------------------
+# Funded accounts
+# ---------------------------------------------------------------------------
+RICH_WALLETS: list[tuple[str, str]] = [
+    ("0xa61464658afeaf65cccaafd3a512b69a83b77618", "9000 ETH"),
+    ("0x36615cf349d7f6344891b1e7ca7c72883f5dc049", "9000 ETH"),
+]
+
+
+# ---------------------------------------------------------------------------
 # Funding logic
 # ---------------------------------------------------------------------------
 def fund_accounts(ctx: ScriptCtx, ecosystem_dir: Path) -> None:
@@ -67,14 +76,139 @@ def fund_accounts(ctx: ScriptCtx, ecosystem_dir: Path) -> None:
     # Two large transfers between rich wallets
     ctx.logger.debug("Funding two rich wallets with 9000 ETH each...")
     amount_9000eth = hex(9000 * 10**18)
-    ctx.sh(
-        f"cast rpc anvil_setBalance 0xa61464658afeaf65cccaafd3a512b69a83b77618 {amount_9000eth} --rpc-url {rpc_url}",
-        print_command=False,
-    )
-    ctx.sh(
-        f"cast rpc anvil_setBalance 0x36615cf349d7f6344891b1e7ca7c72883f5dc049 {amount_9000eth} --rpc-url {rpc_url}",
-        print_command=False,
-    )
+    for addr, _ in RICH_WALLETS:
+        ctx.sh(
+            f"cast rpc anvil_setBalance {addr} {amount_9000eth} --rpc-url {rpc_url}",
+            print_command=False,
+        )
+
+
+
+def _funded_accounts_section(wallets_files: list[Path]) -> str:
+    """
+    Build the "Funded Accounts" Markdown section from wallets YAML files
+    and the hardcoded rich wallets.
+    """
+    lines: list[str] = [
+        "## Funded Accounts",
+        "",
+        "The following accounts are pre-funded on the local L1 (Anvil).",
+        "",
+    ]
+
+    # Collect addresses from wallets.yaml files
+    all_addrs: set[str] = set()
+    for wf in wallets_files:
+        data = utils.load_yaml(wf)
+        all_addrs.update(utils.addresses_from_wallets_yaml(data))
+
+    if all_addrs:
+        lines.append("### Wallet accounts (100 ETH each)")
+        lines.append("")
+        lines.append("| Address | Balance |")
+        lines.append("|---------|---------|")
+        for addr in sorted(all_addrs):
+            lines.append(f"| `{addr}` | 100 ETH |")
+        lines.append("")
+
+    lines.append("### Rich wallets")
+    lines.append("")
+    lines.append("| Address | Balance |")
+    lines.append("|---------|---------|")
+    for addr, balance in RICH_WALLETS:
+        lines.append(f"| `{addr}` | {balance} |")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def generate_readme(
+    readme_path: Path,
+    *,
+    protocol_version: str,
+    ecosystem_name: str,
+    chains: list[str],
+    wallets_files: list[Path],
+) -> None:
+    """Generate a README.md for a local-chains setup directory."""
+    funded_section = _funded_accounts_section(wallets_files)
+
+    if ecosystem_name == "multi_chain":
+        title = f"Multiple Chains ({protocol_version})"
+        desc = "Configuration for running multiple ZKsync OS chains against a shared L1."
+        chain_rows = "\n".join(
+            f"| `chain_{c}.yaml` | {c}     | {3050 + i}     |"
+            for i, c in enumerate(chains)
+        )
+        quick_start = (
+            f"```bash\n"
+            f"# Use script to launch in-memory L1 and {len(chains)} nodes for all chains\n"
+            f"./run_local.sh ./local-chains/{protocol_version}/{ecosystem_name}\n"
+            f"```"
+        )
+        wallets_links = "\n".join(
+            f"* [wallets_{c}.yaml](./wallets_{c}.yaml)" for c in chains
+        )
+        wallets_section = (
+            f"## Wallets\n\n"
+            f"For complete list of keys and wallet addresses, check:\n"
+            f"{wallets_links}\n"
+            f"for the corresponding chain."
+        )
+        contracts_links = "\n".join(
+            f"* [chain_{c}.yaml](./chain_{c}.yaml)" for c in chains
+        )
+        contracts_section = (
+            f"## Contract Addresses\n\n"
+            f"For contract addresses, please refer to `genesis` section of:\n"
+            f"{contracts_links}\n"
+            f"for the corresponding chain."
+        )
+    else:
+        title = f"Single Chain ({protocol_version})"
+        desc = f"Default single-chain configuration for running ZKsync OS against L1 for protocol version {protocol_version}."
+        chain_rows = f"| `config.yaml`     | {chains[0]}     | 3050     |"
+        quick_start = (
+            f"```bash\n"
+            f"# Use script to launch in-memory L1 and the node for one chain\n"
+            f"./run_local.sh ./local-chains/{protocol_version}/{ecosystem_name}\n"
+            f"```"
+        )
+        wallets_section = (
+            "## Wallets\n\n"
+            "For complete list of keys and wallet addresses, check [wallets.yaml](./wallets.yaml)."
+        )
+        contracts_section = (
+            "## Contract Addresses\n\n"
+            "For contract addresses, refer to `genesis` section of the [config.yaml](./config.yaml)."
+        )
+
+    content = f"""\
+# {title}
+
+{desc}
+
+## Chains
+
+| Config            | Chain ID | RPC Port |
+|-------------------|----------|----------|
+{chain_rows}
+
+## Quick Start
+
+{quick_start}
+
+{wallets_section}
+
+{contracts_section}
+
+{funded_section}
+## Versions
+
+For information about how this config was created, check [versions.yaml](../versions.yaml) file.
+"""
+    readme_path.parent.mkdir(parents=True, exist_ok=True)
+    readme_path.write_text(content, encoding="utf-8")
 
 
 def init_ecosystem(
@@ -237,6 +371,30 @@ def init_ecosystem(
                             """,
                         cwd=ecosystem_dir,
                     )
+            # ------------------------------------------------------------------ #
+            # Generate README with funded account information
+            # ------------------------------------------------------------------ #
+            all_wallets_files = list(ecosystem_dir.rglob("wallets.yaml"))
+            generate_readme(
+                base / "README.md",
+                protocol_version=protocol_version,
+                ecosystem_name=ecosystem_name,
+                chains=chains,
+                wallets_files=all_wallets_files,
+            )
+
+            # Also generate for default setup (symlinks to first chain)
+            default_wallets = [
+                ecosystem_dir / "chains" / chains[0] / "configs" / "wallets.yaml"
+            ]
+            generate_readme(
+                default_base / "README.md",
+                protocol_version=protocol_version,
+                ecosystem_name="default",
+                chains=[chains[0]],
+                wallets_files=default_wallets,
+            )
+
             # Update Default setup with information from the first chain in the list
             # TODO: temporarily we are reusing one of the chains from Multichain setup for the Default setup
             contracts_yaml = (
